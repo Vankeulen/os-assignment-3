@@ -94,7 +94,7 @@ Add the following functionality.
    c) Restart the idle process to use the rest of the time slice.
 */
 
-#define NUM_SECONDS 20
+#define NUM_SECONDS 5
 #define EVER ;;
 
 #define assertsyscall(x, y) if(!((x) y)){int err = errno; \
@@ -139,6 +139,10 @@ struct PCB {
 
 PCB* running;
 PCB* idle;
+
+struct sigaction* tick;
+struct sigaction* child;
+int send_signals_pid;
 
 // http://www.cplusplus.com/reference/list/list/
 list<PCB*> new_list;
@@ -257,13 +261,15 @@ void send_signals(int signal, int pid, int interval, int number) {
 	dprintt("at beginning of send_signals", getpid());
 
 	for(int i = 1; i <= number; i++) {
+		WRITEI(i);
+		WRITES("\n");
 		assertsyscall(sleep(interval), == 0);
 		dprintt("sending", signal);
 		dprintt("to", pid);
 		assertsyscall(kill(pid, signal), == 0)
 	}
 
-	dmess("at end of send_signals");
+	WRITES("at end of send_signals\n");
 }
 
 struct sigaction* create_handler(int signum, void(*handler)(int)) {
@@ -361,12 +367,16 @@ void scheduler(int signum) {
 
 	tocont->cputime++;
 	if (running != tocont) {
+        /*
+            This is done in ISV, though I don't think there's any harm in
+            stopping an already-stopped process.
 		kill(running->pid, SIGSTOP);
 		WRITES("\nPausing ");
 		WRITEI(running->pid);
 		WRITES("/");
 		WRITES(running->name);
 		WRITES("\n");
+        */
 		running->switches++;
 	}
 	
@@ -453,23 +463,18 @@ void boot() {
 
 	ISV[SIGALRM] = scheduler;
 	ISV[SIGCHLD] = process_done;
-	struct sigaction* alarm = create_handler(SIGALRM, ISR);
-	struct sigaction* child = create_handler(SIGCHLD, ISR);
+	tick = create_handler(SIGALRM, ISR);
+	child = create_handler(SIGCHLD, ISR);
 
 	// start up clock interrupt
 	int ret;
-	if((ret = fork()) == 0) {
+	assertsyscall((ret = fork()), >= 0);
+	if (ret == 0) {
 		send_signals(SIGALRM, getppid(), 1, NUM_SECONDS);
-
-		// once that's done, cleanup and really kill everything...
-		delete(alarm);
-		delete(child);
-		delete(idle);
-		kill(0, SIGTERM);
+		exit(0);
 	}
-
-	if(ret < 0) {
-		perror("fork");
+	else {
+		send_signals_pid = ret;
 	}
 }
 
@@ -540,12 +545,10 @@ int main(int argc, char** argv) {
 	running = idle;
 	cout << running;
 
-	// we keep this process around so that the children don't die and
-	// to keep the IRQs in place.
-	for (EVER) {
-		// "Upon termination of a signal handler started during a
-		// pause(), the pause() call will return."
-		pause();
-	}
-
+	int s;
+	assertsyscall(waitpid(send_signals_pid, &s, 0), == send_signals_pid);
+	delete(tick);
+	delete(child);
+	delete(idle);
+	kill(0, SIGTERM);
 }
